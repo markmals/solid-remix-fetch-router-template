@@ -1,0 +1,38 @@
+[tools]
+node = "latest"
+pnpm = "latest"
+
+[hooks]
+postinstall = "pnpm install"
+
+[env]
+_.path = ["{{config_root}}/node_modules/.bin"]
+
+[tasks.dev]
+description = "Run the development server"
+run = ["vite dev"]
+
+[tasks.build]
+description = "Build the app"
+# sources = [
+#     "pnpm-lock.yaml",
+#     "vite.config.ts",
+#     "tsconfig.json",
+#     "entry.worker.ts",
+#     "app/**/*.{ts,tsx,css}",
+# ]
+outputs = ["dist"]
+run = "vite build"
+
+[tasks.preview]
+description = "Preview the built application"
+depends = "build"
+run = "vite preview"
+
+[tasks.fmt]
+description = "Format the entire project"
+run = "prettier --write ."
+
+[tasks.typecheck]
+description = "Typecheck the entire project"
+run = "tsgo --noEmit"

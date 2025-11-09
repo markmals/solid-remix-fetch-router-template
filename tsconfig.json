@@ -1,0 +1,33 @@
+{
+    "compilerOptions": {
+        "lib": ["DOM", "DOM.Iterable", "ESNext", "WebWorker"],
+        "types": ["vite/client"],
+
+        // General
+        "jsx": "preserve",
+        "jsxImportSource": "solid-js",
+
+        // Modules
+        "target": "ESNext",
+        "module": "ESNext",
+        "moduleResolution": "Bundler",
+        "allowSyntheticDefaultImports": true,
+        "esModuleInterop": true,
+        "isolatedModules": true,
+        "noEmit": true,
+        "skipLibCheck": true,
+        "allowImportingTsExtensions": true,
+        "resolveJsonModule": true,
+        "forceConsistentCasingInFileNames": true,
+
+        // Type Checking & Safety
+        "strict": true,
+        "noImplicitOverride": true,
+        "noFallthroughCasesInSwitch": true,
+        "useUnknownInCatchVariables": true,
+
+        "paths": {
+            "~/*": ["./app/*"]
+        }
+    }
+}
