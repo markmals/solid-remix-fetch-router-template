@@ -5,8 +5,8 @@ import { Router } from "@solidjs/router";
 import { MetaProvider } from "@solidjs/meta";
 import "solid-devtools";
 
-import { components } from "~/defs/components.ts";
-import { WorkerRegistry } from "~/lib/registry";
+import { routes } from "~/routes.ts";
+import { WorkerRegistry } from "~/lib/worker-registry";
 import { on } from "@remix-run/interaction";
 
 const registry = new WorkerRegistry();
@@ -16,7 +16,7 @@ on(registry, {
         render(
             () => (
                 <MetaProvider>
-                    <Router>{components}</Router>
+                    <Router>{routes}</Router>
                 </MetaProvider>
             ),
             document.body,

@@ -26,9 +26,13 @@ Directory highlights:
 app/
   components/        UI components
   data/              Queries (GET) and Actions (mutations)
-  defs/              Route definitions for UI and API
+  lib/               Shared utilities (middleware, fetch-client, hooks)
   routes/            Solid route components (root/index/show/edit/etc.)
-  worker/            Service Worker router + middleware
+  worker/            Service Worker handlers + data layer
+  app.ts             UI route definitions
+  api.ts             API route definitions
+  routes.ts          Solid Router configuration + preloads
+  entry.client.tsx   Client bootstrap + service worker registration
 entry.worker.ts      Service Worker bootstrap (intercepts /api)
 index.html           SPA shell + client entry
 vite.config.ts       Multi-entry build config (main + worker)
@@ -39,32 +43,32 @@ tsconfig.json        Strict TS, bundler resolution, ~/* alias
 
 ### 1) UI routing (client)
 
-- `app/defs/app.ts` declares **URL patterns** via `createRoutes`.
-- `app/defs/components.ts` wires patterns into **Solid Router** `RouteDefinition[]`, including `preload` hooks that call queries.
-- `app/entry.client.tsx` registers service worker, then mounts `<Router>` + `<MetaProvider>` to `document.body`.
+- `app/app.ts` declares **URL patterns** via `createRoutes`.
+- `app/routes.ts` wires patterns into **Solid Router** `RouteDefinition[]`, including `preload` hooks that call queries.
+- `app/entry.client.tsx` uses `WorkerRegistry` to register service worker and mount `<Router>` + `<MetaProvider>` to `document.body`.
 
 ### 2) API routing (Service Worker)
 
-- `entry.worker.ts` installs/activates the service worker and **only** handles **same-origin** requests with path starting `/api/`.
-- `app/worker/router.ts` creates a `fetch-router` with middleware:
+- `entry.worker.ts` installs/activates the service worker with lifecycle events (`install` → `skipWaiting()`, `activate` → `clients.claim()`) and **only** handles **same-origin** requests with path starting `/api/`.
+- `entry.worker.ts` creates a `fetch-router` with middleware:
     - `formData()` to parse bodies
     - `methodOverride()` for RESTful forms
     - `clientRedirect()` transforms server redirects into `200` + `X-Redirect` header (for client navigations)
     - `logger()` in dev
-- `app/defs/api.ts` defines **typed API routes** with `createRoutes`/`resources` (RESTful patterns under `/api`).
-- Handlers in `app/worker/router.ts` map those API routes to route handlers and respond with `json()` or `redirect()`.
+- `app/api.ts` defines **typed API routes** with `createRoutes`/`resources` (RESTful patterns under `/api`).
+- `app/worker/handlers.ts` exports handlers that map API routes to functions, using `satisfies RouteHandlers<typeof api>` for type safety. Handlers respond with `json()` or `redirect()`.
 
 ### 3) Data layer (client)
 
-- `app/lib/fetch-client.ts` enhances route objects with a `fetch()` helper:
+- `app/lib/fetch-client.ts` provides `createClient()` that enhances route objects with a `fetch()` helper:
     - Automatically builds `href` from `pattern` + params + search
     - Sends JSON/FormData/URLSearchParams appropriately
     - **Reads `X-Redirect`** and triggers a SPA redirect
     - Parses JSON responses (falls back to text)
     - Exposes a stable `key` for cache/query identification
-- `app/data/queries.ts` wraps GET endpoints with Solid Router’s `query()` for caching + suspense (`createAsync`).
-- `app/data/actions.ts` creates Solid `action()` wrappers for mutations via `formAction()`:
-    - All mutations POST to the API and use **method override** by setting `_method` when needed.
+- `app/data/queries.ts` exports a `queries` object with methods that wrap GET endpoints using Solid Router's `query()` for caching + suspense (`createAsync`). Also exports the API `client` instance created via `createClient(api)`.
+- `app/data/actions.ts` exports an `actions` object with methods that wrap mutations via `formAction()`:
+    - All mutations POST to the API and use **method override** by setting `_method` on the `FormData` when needed.
 
 ## Code style & conventions
 
@@ -83,7 +87,7 @@ tsconfig.json        Strict TS, bundler resolution, ~/* alias
 ## Service Worker specifics
 
 - **Scope:** only same-origin `/api/*` requests are handled (`entry.worker.ts` checks both).
-- **Build artifact:** Vite emits `entry.worker.js`. Client registers either `/entry.worker.ts` in dev or `/entry.worker.js` in prod (see `lib/registry.ts`).
+- **Build artifact:** Vite emits `entry.worker.js`. Client registers either `/entry.worker.ts` in dev or `/entry.worker.js` in prod (see `app/entry.client.tsx`).
 - **Redirect bridge:** Server redirects are transformed to `200` with `X-Redirect` by `clientRedirect()` middleware; the client fetch helper translates that to SPA navigation.
 
 **Guardrails for agents**
@@ -109,10 +113,12 @@ tsconfig.json        Strict TS, bundler resolution, ~/* alias
 
 ## Glossary
 
-- **App routes:** Human-facing paths in `app/defs/app.ts`, rendered by Solid
-- **API routes:** Machine endpoints in `app/defs/api.ts`, handled by the service worker `fetch-router`
+- **App routes:** Human-facing paths in `app/app.ts`, rendered by Solid
+- **API routes:** Machine endpoints in `app/api.ts`, handled by the service worker `fetch-router`
 - **Query:** A cached GET wrapper created with `query()` for suspense + deduplication
 - **Action:** A mutation wrapper created with `formAction()` that POSTs and uses `_method` when needed
+- **Client:** Enhanced route object created via `createClient(api)` that provides typed `fetch()` methods
+- **Handlers:** Route handler functions in `app/worker/handlers.ts` that process API requests
 
 ## Notes for agents integrating with tools
 
@@ -123,18 +129,19 @@ tsconfig.json        Strict TS, bundler resolution, ~/* alias
 
 ## Navigation via `<form method="get">` (button → client-side navigation)
 
-Use GET forms anywhere you want a button to behave like a link. The root layout intercepts GET form submissions and converts them to SPA navigations.
+Use GET forms anywhere you want a button to behave like a link. The root layout intercepts GET form submissions and converts them to SPA navigations via the `useInstallGlobalNavigation()` hook.
 
 ### How it works
 
+- Call `useInstallGlobalNavigation()` in your root component to set up the global navigation handler.
+- The hook uses `@remix-run/interaction`'s `on()` helper to listen for document `submit` events.
 - Wrap buttons in `<form method="get">` with an `action` built from `app.*.href()`.
-- `root.tsx` listens for document `submit` events and prevents default for non-POST forms, then calls `navigate(...)` using the `useInstallGlobalNavigation()` hook.
 
 ```tsx
-// app/routes/root.tsx (excerpt)
-useInstallGlobalNavigation();
+// app/lib/use-install-global-nav.ts
+import { on } from "@remix-run/interaction";
+import { useNavigate } from "@solidjs/router";
 
-// app/lib/use-install-global-nav.ts (excerpt)
 export function useInstallGlobalNavigation() {
     const navigate = useNavigate();
 
@@ -152,6 +159,16 @@ export function useInstallGlobalNavigation() {
 ```
 
 ```tsx
+// app/routes/root.tsx (excerpt)
+import { useInstallGlobalNavigation } from "~/lib/use-install-global-nav.ts";
+
+export default function Root(props: ParentProps) {
+    useInstallGlobalNavigation();
+    // ...
+}
+```
+
+```tsx
 // example usage in a route
 <form action={app.contact.edit.href({ contactId: contact().id })} method="get">
     <button type="submit">Edit</button>
@@ -161,6 +178,7 @@ export function useInstallGlobalNavigation() {
 ### Notes
 
 - Always build URLs with `app.*.href(...)`.
+- Use `on()` from `@remix-run/interaction` for declarative event handling with automatic cleanup.
 
 ## Mutations: route everything through `formAction`, `<form method="post">`, and RESTful endpoints
 
@@ -170,24 +188,31 @@ All writes go through Solid Router `action()` wrappers produced by `formAction()
 
 ```ts
 // app/data/actions.ts
-export const createContact = formAction(api.contact.create); // POST
-export const updateContact = formAction(api.contact.update); // PUT (via _method)
-export const favoriteContact = formAction(api.contact.favorite); // PUT (via _method)
-export const destroyContact = formAction(api.contact.destroy); // DELETE (via _method)
+export const actions = {
+    create: formAction(api.contact.create), // POST
+    update: formAction(api.contact.update), // PUT (via _method)
+    favorite: formAction(api.contact.favorite), // PUT (via _method)
+    destroy: formAction(api.contact.destroy), // DELETE (via _method)
+};
 ```
 
 ```tsx
 // usage in UI
-<form action={updateContact.with({ contactId: contact().id })} method="post"> … </form>
-<form action={destroyContact.with({ contactId: contact().id })} method="post"> … </form>
-<form action={favoriteContact.with({ contactId: contact().id })} method="post"> … </form>
+<form action={actions.update.with({ contactId: contact().id })} method="post"> … </form>
+<form action={actions.destroy.with({ contactId: contact().id })} method="post"> … </form>
+<form action={actions.favorite.with({ contactId: contact().id })} method="post"> … </form>
 ```
 
 ### Server (Service Worker)
 
 ```ts
-// app/worker/router.ts (excerpt)
-router.map(api, {
+// app/worker/handlers.ts
+import { RouteHandlers } from "@remix-run/fetch-router";
+import { json, redirect } from "@remix-run/fetch-router/response-helpers";
+import { api } from "~/api";
+import { app } from "~/app";
+
+export const handlers = {
     contact: {
         update: async ({ params, formData }) => {
             const contact = await updateContact(params.contactId, {
@@ -206,7 +231,14 @@ router.map(api, {
             return new Response(null); // don't need to navigate anywhere once this update completes
         },
     },
-});
+} satisfies RouteHandlers<typeof api>;
+```
+
+```ts
+// entry.worker.ts (excerpt)
+import { handlers } from "~/worker/handlers.ts";
+
+router.map(api, handlers);
 ```
 
 ### Why
@@ -219,21 +251,23 @@ router.map(api, {
 Use Solid Router `preload` to warm the data cache for any route (or child route) that will call `createAsync()`.
 
 ```ts
-// app/defs/components.ts
-export const components = [
+// app/routes.ts
+import { queries } from "~/data/queries.ts";
+
+export const routes: RouteDefinition[] = [
     {
         path: app.root.pattern.toString(),
-        preload: ({ location }) => listContacts(location.query.q as string),
+        preload: ({ location }) => queries.list(location.query.q as string),
         component: lazy(() => import("~/routes/root.tsx")),
         children: [
             {
                 path: app.contact.show.pattern.toString(),
-                preload: ({ params }) => showContact(params.contactId),
+                preload: ({ params }) => queries.show(params.contactId),
                 component: lazy(() => import("~/routes/show-contact.tsx")),
             },
             {
                 path: app.contact.edit.pattern.toString(),
-                preload: ({ params }) => showContact(params.contactId),
+                preload: ({ params }) => queries.show(params.contactId),
                 component: lazy(() => import("~/routes/edit-contact.tsx")),
             },
         ],
@@ -243,15 +277,18 @@ export const components = [
 
 ```ts
 // app/data/queries.ts
-export const listContacts = query(
-    (q?: string) => client.contact.list.fetch<ContactRecord[]>({ search: { q: q ?? "" } }),
-    client.contact.list.key,
-);
+export const client = createClient(api);
 
-export const showContact = query(
-    (id: string) => client.contact.show.fetch<ContactRecord>({ path: { contactId: id } }),
-    client.contact.show.key,
-);
+export const queries = {
+    list: query(
+        (q?: string) => client.contact.list.fetch<ContactRecord[]>({ search: { q: q ?? "" } }),
+        client.contact.list.key,
+    ),
+    show: query(
+        (id: string) => client.contact.show.fetch<ContactRecord>({ path: { contactId: id } }),
+        client.contact.show.key,
+    ),
+};
 ```
 
 ### Guidelines
@@ -275,7 +312,7 @@ export function SearchBar() {
         <form action={app.index.href()} id="search-form" method="get">
             <input
                 aria-label="Search contacts"
-                class={isSearching() ? "loading" : undefined}
+                classList={{ loading: isSearching() }}
                 value={query() ?? ""}
                 name="q"
                 onInput={e => {
@@ -303,13 +340,15 @@ Mirror pending form state locally by watching the submission that matches your a
 
 ```tsx
 // app/components/Favorite.tsx
+import { actions } from "~/data/actions.ts";
+
 export function Favorite(props: { favorite: boolean; id: string }) {
-    const submission = useSubmission(favoriteContact, ([{ contactId }]) => contactId === props.id);
+    const submission = useSubmission(actions.favorite, ([{ contactId }]) => contactId === props.id);
     const favorite = () =>
         submission.pending ? submission.input?.[1].get("favorite") === "true" : props.favorite;
 
     return (
-        <form action={favoriteContact.with({ contactId: props.id })} method="post">
+        <form action={actions.favorite.with({ contactId: props.id })} method="post">
             <button
                 aria-label={favorite() ? "Remove from favorites" : "Add to favorites"}
                 name="favorite"
@@ -364,9 +403,9 @@ const isPending = () => isRouting() && pendingHref() === link();
 ```
 
 ```tsx
-const isSearching = () => isRouting() && query();
+const isSearching = () => Boolean(isRouting() && query());
 
-<input class={{ loading: isSearching() }} ... />
+<input classList={{ loading: isSearching() }} ... />
 <div aria-hidden hidden={!isSearching()} id="search-spinner" />
 ```
 
@@ -402,7 +441,7 @@ client.contact.show.fetch({ path: { contactId: id } });
 Server handlers should return `redirect(...)` whenever mutation implies navigation. The Service Worker converts redirects into a header that the client respects.
 
 ```ts
-// app/worker/middleware.ts
+// app/lib/middleware.ts
 export const REDIRECT_KEY = "X-Redirect";
 export function clientRedirect(): Middleware {
     return async (_, next) => {
@@ -434,7 +473,7 @@ if (location) throw redirect(location); // @solidjs/router redirect (SPA)
 All mutation forms are `<form method="post">`. `formAction()` adds `_method` when the server expects PUT/DELETE/... so the middleware can upgrade the method.
 
 ```ts
-// app/worker/middleware.ts
+// app/lib/middleware.ts
 export const METHOD_KEY = "_method";
 export const methodOverride = () => _methodOverride({ fieldName: METHOD_KEY });
 ```
@@ -477,6 +516,188 @@ Top-level UI is wrapped in `<Suspense>` so route preloads and queries render a l
 </Suspense>
 ```
 
+## Event-based service worker registration with `WorkerRegistry`
+
+Use the `WorkerRegistry` class to encapsulate service worker registration logic with typed events and automatic reload handling.
+
+```tsx
+// app/entry.client.tsx
+import { on } from "@remix-run/interaction";
+import { WorkerRegistry } from "./lib/worker-registry.ts";
+
+const registry = new WorkerRegistry();
+
+on(registry, {
+    registered() {
+        render(
+            () => (
+                <MetaProvider>
+                    <Router>{routes}</Router>
+                </MetaProvider>
+            ),
+            document.body,
+        );
+    },
+});
+
+await registry.register();
+```
+
+```ts
+// app/lib/worker-registry.ts
+import { TypedEventTarget } from "./typed-event-target.ts";
+
+export class WorkerRegistry extends TypedEventTarget<RegistryEventMap> {
+    async register() {
+        if (!navigator.serviceWorker.controller) {
+            await navigator.serviceWorker.register(this.#entry, { type: "module" });
+            window.location.reload(); // Reload to activate the worker
+        } else {
+            this.dispatchEvent(new RegistryEvent("registered"));
+        }
+    }
+}
+```
+
+### Why
+
+- Encapsulates the "register → reload if needed → render" flow
+- Uses typed events for coordination between registration and rendering
+- Automatically handles the development vs production worker paths
+
+## `createAsync()` wrapper with noop proxy
+
+Use a custom `createAsync()` wrapper that provides a noop proxy as the initial value to prevent errors when accessing properties before data loads.
+
+```ts
+// app/lib/create-async.ts
+import { createAsync as _createAsync } from "@solidjs/router";
+
+export function createAsync<T>(fetcher: () => Promise<T>): Accessor<T> {
+    return _createAsync(fetcher, { initialValue: makeNoopProxy() });
+}
+```
+
+### How it works
+
+- The noop proxy returns empty strings, zeros, or empty arrays for any property access
+- Prevents `Cannot read property 'x' of undefined` errors during initial render
+- Implements `Symbol.toPrimitive` for safe coercion in JSX
+- Returns `undefined` for the `then` property to prevent being treated as a Promise
+
+### Usage
+
+```tsx
+// Instead of needing optional chaining everywhere
+const contact = createAsync(() => queries.show(params.contactId));
+
+// You can safely access properties directly
+<h1>
+    {contact().first} {contact().last}
+</h1>;
+
+// The noop proxy ensures these don't error before data loads
+```
+
+## Declarative event handling with `on()` from `@remix-run/interaction`
+
+Use `on()` for type-safe, declarative event handling with automatic cleanup.
+
+```ts
+import { on } from "@remix-run/interaction";
+
+// Document events
+on(document, signal, {
+    submit(event) {
+        // handle submit
+    },
+    keydown(event) {
+        // handle keydown
+    },
+});
+
+// Custom event targets with TypedEventTarget
+on(registry, signal, {
+    registered() {
+        // handle custom event
+    },
+});
+```
+
+### Benefits
+
+- Automatically handles event listener cleanup when an AbortSignal is passed
+- Type-safe event handlers
+- Cleaner than manual `addEventListener`/`removeEventListener`
+- Works with both standard and custom events
+
+## Object-based exports for queries and actions
+
+Export queries and actions as objects rather than individual named exports for clarity and organization.
+
+```ts
+// app/data/queries.ts
+export const queries = {
+    list: query(/* ... */),
+    show: query(/* ... */),
+};
+
+// app/data/actions.ts
+export const actions = {
+    create: formAction(/* ... */),
+    update: formAction(/* ... */),
+    destroy: formAction(/* ... */),
+    favorite: formAction(/* ... */),
+};
+```
+
+### Why
+
+- Clearer distinction between queries and actions at import sites
+- Easier to see all available queries/actions in one place
+- Better autocomplete experience
+- Consistent naming pattern
+
+## Handler type safety with `satisfies RouteHandlers<typeof api>`
+
+Use the `satisfies` operator to ensure handlers match API route structure while preserving inference.
+
+```ts
+// app/worker/handlers.ts
+import { RouteHandlers } from "@remix-run/fetch-router";
+import { api } from "~/api";
+
+export const handlers = {
+    contact: {
+        list: async ({ url }) => {
+            /* ... */
+        },
+        show: async ({ params }) => {
+            /* ... */
+        },
+        create: async () => {
+            /* ... */
+        },
+        update: async ({ params, formData }) => {
+            /* ... */
+        },
+        destroy: async ({ params }) => {
+            /* ... */
+        },
+        favorite: async ({ params, formData }) => {
+            /* ... */
+        },
+    },
+} satisfies RouteHandlers<typeof api>;
+```
+
+### Benefits
+
+- Type errors if handlers don't match API route definitions
+- Full type inference for params, formData, url
+- Prevents typos and missing handlers
+- Documents the relationship between handlers and API routes
+
 ## Acceptance checklist for changes to these patterns
 
 - All navigations use `app.*.href(...)` or API fetch via enhanced client
@@ -484,4 +705,7 @@ Top-level UI is wrapped in `<Suspense>` so route preloads and queries render a l
 - Redirects are used appropriately; optimistic toggles return `new Response(null)`
 - Queries are preloaded with `preload` and consumed with `createAsync()`
 - Pending UI present globally (`useIsRouting()`) and locally as needed
+- All non-JSX event handlers use `on()` from `@remix-run/interaction`
+- Service worker registration uses `WorkerRegistry` with event-based coordination
+- Handlers use `satisfies RouteHandlers<typeof api.*>` for type safety
 - Build/typecheck succeed; demo latency still reveals loading states
